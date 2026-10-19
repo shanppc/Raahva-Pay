@@ -3,11 +3,17 @@ pragma solidity ^0.8.30;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
+interface IRateOracle{
+    function getUsdcRate() external view returns(uint256 lastExchangeRate, uint64 lastUpdatedAt);
+    function decimals() external view returns(uint8);
+}
+
  error ZeroAmount();
  error notMinAmount();
  error InvalidExchangeRate();
  error RateNotInitialized();
  error  StaleRate();
+ error FutureTime();
 
 contract RaahvaPay{
 
@@ -16,8 +22,7 @@ contract RaahvaPay{
     uint256 public exchangeRate;
     // Oracle Vars here 
     uint64 private constant MAX_RATE_AGE = 1 days;
-    uint64 private lastRateUpdate;
-    bool private rateInitialized;
+    IRateOracle public oracle;
 
 
     enum Status {
@@ -46,16 +51,21 @@ contract RaahvaPay{
         RampType rampType;
     }
 
+    constructor(address _oracle) {
+        oracle = IRateOracle(_oracle);
+    }
+
     mapping (uint256 => Quote) public quotes;
 
     function createQuote(uint256 _amount, RampType _rampType) public {
         if(_amount == 0 ) { revert ZeroAmount();}
-        if(!rateInitialized){ revert RateNotInitialized();}
-        if(block.timestamp - lastRateUpdate > MAX_RATE_AGE) { revert StaleRate();}
-        // Validation ToDo
+        (uint256 exchange_rate, uint64 updatedAt) = oracle.getUsdcRate(); 
+        if(exchange_rate == 0 ) {revert InvalidExchangeRate();}
+        if(block.timestamp < updatedAt){ revert FutureTime();}
+        if(block.timestamp - updatedAt > MAX_RATE_AGE) { revert StaleRate();}
+
        uint256 pkrAmount;
        uint256 usdcAmount;
-       uint256 exchange_rate = exchangeRate;
 
        if(exchange_rate == 0) {revert InvalidExchangeRate();}
 
