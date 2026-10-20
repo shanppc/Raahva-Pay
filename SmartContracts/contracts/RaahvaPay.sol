@@ -23,6 +23,7 @@ contract RaahvaPay{
     // Oracle Vars here 
     uint64 private constant MAX_RATE_AGE = 1 days;
     IRateOracle public oracle;
+ 
 
 
     enum Status {
@@ -54,7 +55,7 @@ contract RaahvaPay{
     constructor(address _oracle) {
         oracle = IRateOracle(_oracle);
     }
-
+     //qouteId => Qoute
     mapping (uint256 => Quote) public quotes;
 
     function createQuote(uint256 _amount, RampType _rampType) public {
