@@ -15,6 +15,7 @@
 
 # Typechain output
 /types
+bin
 
 # Environment files
 .env
