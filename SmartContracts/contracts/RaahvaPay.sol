@@ -4,6 +4,8 @@ pragma solidity ^0.8.30;
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 interface IRateOracle{
     function getUsdcRate() external view returns(uint256 lastExchangeRate, uint64 lastUpdatedAt);
@@ -31,8 +33,9 @@ interface IRateOracle{
  error InvalidRampType();
  error SettlementDeadlinePassed();
  error InvalidSignatureDeadline();
+ error SettlementDeadlineNotPass();
 
-contract RaahvaPay is EIP712{
+contract RaahvaPay is Pausable, Ownable, EIP712{
 
     uint256 public constant RATE_PRECISION = 1e8;
     uint256 public constant USDC_PRECISION = 1e18;
@@ -78,7 +81,7 @@ contract RaahvaPay is EIP712{
         RampType rampType;
     }
 
-    constructor(address _oracle, address _operator) EIP712("Raahva Pay", "1") {
+    constructor(address _oracle, address _operator) EIP712("Raahva Pay", "1") Ownable(msg.sender) {
         oracle = IRateOracle(_oracle);
         operator = _operator;
     }
@@ -95,8 +98,10 @@ contract RaahvaPay is EIP712{
     event LiquiditySupplied(address indexed By, uint256 Amount);
     event OnRampSettled(uint256 QuoteId, address indexed user, uint256 Amount, address indexed Signer);
     event OffRampSettled(uint256 QuoteId, address indexed user, uint256 Amount, address indexed Signer);
+    event RefundIssued(address indexed user, uint256 RefundAmount);
+    event feeWithdrawn(address indexed Owner, uint256 FeeAmount);
 
-    function createQuote(uint256 _amount, RampType _rampType) public {
+    function createQuote(uint256 _amount, RampType _rampType) public whenNotPaused {
         if(_amount == 0 ) { revert ZeroAmount();}
 
         (uint256 exchange_rate, uint64 updatedAt) = oracle.getUsdcRate(); //Fetch Rate from Oracle
@@ -157,7 +162,7 @@ contract RaahvaPay is EIP712{
      emit QuoteCreated( quoteId, msg.sender, pkrAmount, usdcAmount, _rampType );
     }
 
-    function fundOffRampQoute(uint256 _qouteId) external payable{
+    function fundOffRampQoute(uint256 _qouteId) external whenNotPaused payable{
         Quote storage quote = quotes[_qouteId];
         if(quote.usdcAmount == 0) {revert QuoteNotAvailable();}
         if(block.timestamp > quote.expireAt) { revert QuoteExpired();}
@@ -174,7 +179,7 @@ contract RaahvaPay is EIP712{
         emit QuoteFunded(_qouteId, msg.sender, msg.value, quote.rampType);
     }
 
-    function sumbitBankProof(uint256 _quoteId, string calldata _bankTxId) external {
+    function sumbitBankProof(uint256 _quoteId, string calldata _bankTxId) external whenNotPaused {
         Quote storage quote = quotes[_quoteId];
         if(quote.usdcAmount == 0) {revert QuoteNotAvailable();}
         if(quote.status != Status.QuoteCreated) {revert QuoteNotCreated();}
@@ -191,11 +196,12 @@ contract RaahvaPay is EIP712{
         usedBankTxIds[bankTxIdHash] = true;
 
         quote.status = Status.ProofSubmitted;
+        quote.settlementDeadline = uint64(block.timestamp + 10 minutes);
 
         emit BankProofSumbitted(_quoteId, msg.sender, bankTxIdHash);
     }
 
-    function verifyAndSettleOnRamp(uint256 _quoteId, uint256 _deadline, bytes calldata _signature ) external {
+    function verifyAndSettleOnRamp(uint256 _quoteId, uint256 _deadline, bytes calldata _signature ) external whenNotPaused {
         Quote storage quote = quotes[_quoteId];
         // 1. Validate quote
         if (quote.usdcAmount == 0) {revert QuoteNotAvailable(); }
@@ -222,24 +228,22 @@ contract RaahvaPay is EIP712{
         if (signer != operator) { revert UnAuthorized(); }
 
         // 5. Check available protocol liquidity
+        if (quote.usdcAmount > totalLiquidity) { revert InsufficientLiquidity();}
+
         uint256 payout = quote.usdcAmount - quote.fee;
-
-        if (payout > totalLiquidity) { revert InsufficientLiquidity();}
-
         // 6. Update state before external interaction
         quote.status = Status.Settled;
-        totalLiquidity -= payout;
+        totalLiquidity -= quote.usdcAmount;
         totalFee += quote.fee;
 
         // 7. Release USDC to the user
         (bool success, ) = payable(quote.user).call{value: payout}("");
-
         if (!success) {revert TransferFailed(); }
 
         emit OnRampSettled( _quoteId, quote.user, payout, signer );
     }
 
-    function settleOffRampQuote( uint256 _quoteId, uint256 _deadline, bytes32 _bankTxIdHash, bytes calldata _signature ) external {
+    function settleOffRampQuote( uint256 _quoteId, uint256 _deadline, bytes32 _bankTxIdHash, bytes calldata _signature ) external whenNotPaused {
         Quote storage quote = quotes[_quoteId];
 
         if(quote.usdcAmount < 5 ether) { revert QuoteNotAvailable(); }
@@ -265,11 +269,44 @@ contract RaahvaPay is EIP712{
 
     }
 
+    function refundQuote(uint256 _quoteId) external {
+        Quote storage quote = quotes[_quoteId];
+        if(quote.usdcAmount < 5 ether){ revert QuoteNotAvailable(); }
+        if(quote.user != msg.sender){ revert UnAuthorized(); }
+        if(quote.rampType != RampType.OffRamp){revert InvalidRampType(); }
+        if(quote.status != Status.Funded){ revert InvalidQuoteStatus(); }
+        if(quote.settlementDeadline >= block.timestamp){ revert SettlementDeadlineNotPass();}
+
+        quote.status = Status.Refunded;
+        totalCustodied -= quote.usdcAmount;
+
+        (bool ok,) = quote.user.call{value: quote.usdcAmount}("");
+        if(!ok){revert TransferFailed();}
+
+        emit RefundIssued(msg.sender, quote.usdcAmount);
+    } 
+
     function supplyLiquidity() external payable {
         if(msg.value == 0) {revert ZeroAmount();}
         totalLiquidity += msg.value;
 
         emit LiquiditySupplied(msg.sender, msg.value);
     }
+
+    function pause() external onlyOwner { _pause(); }
+
+    function unpause() external onlyOwner { _unpause(); }
+
+    function withdrawTotalFee() external onlyOwner {
+        uint256 amount = totalFee;
+        if(amount == 0) {revert ZeroAmount();}
+
+        totalFee = 0;
+
+        (bool ok,) = owner().call{value:amount}("");
+        if(!ok){revert TransferFailed();}
+
+        emit feeWithdrawn(msg.sender, amount);
+    } 
     
 }
