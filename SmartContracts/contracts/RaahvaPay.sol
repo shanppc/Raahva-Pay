@@ -29,6 +29,8 @@ interface IRateOracle{
  error SignatureExpired();
  error TransferFailed();
  error InvalidRampType();
+ error SettlementDeadlinePassed();
+ error InvalidSignatureDeadline();
 
 contract RaahvaPay is EIP712{
 
@@ -45,7 +47,9 @@ contract RaahvaPay is EIP712{
     uint256 public totalCustodied;
     uint256 public totalLiquidity;
     address public operator;
-    bytes32 public constant BANK_PAYMENT_TYPEHASH =keccak256("BankPaymentVerification(uint256 quoteId,address user,uint256 pkrAmount,bytes32 bankTxIdHash,uint256 deadline)");
+
+    bytes32 public constant ONRAMP_PAYMENT_TYPEHASH = keccak256( "OnRampPaymentVerification(uint256 quoteId,address user,uint256 pkrAmount,bytes32 bankTxIdHash,uint256 deadline)");
+    bytes32 public constant OFFRAMP_PAYMENT_TYPEHASH = keccak256( "OffRampPaymentVerification(uint256 quoteId,address user,uint256 pkrAmount,bytes32 bankTxIdHash,uint256 deadline)");
 
     enum Status {
         QuoteCreated,
@@ -89,7 +93,8 @@ contract RaahvaPay is EIP712{
     event QuoteFunded(uint256 QuoteId, address indexed user,uint256 FundedValue, RampType rampType);
     event BankProofSumbitted(uint256 QuoteId, address indexed user, bytes32 proofHash);
     event LiquiditySupplied(address indexed By, uint256 Amount);
-    event OnRampSettled(uint256 QuoteId, address indexed user, uint256 Amount, address Signer);
+    event OnRampSettled(uint256 QuoteId, address indexed user, uint256 Amount, address indexed Signer);
+    event OffRampSettled(uint256 QuoteId, address indexed user, uint256 Amount, address indexed Signer);
 
     function createQuote(uint256 _amount, RampType _rampType) public {
         if(_amount == 0 ) { revert ZeroAmount();}
@@ -202,10 +207,12 @@ contract RaahvaPay is EIP712{
         // 2. Validate signature deadline
         if (block.timestamp > _deadline) { revert SignatureExpired(); }
 
+        if(_deadline > quote.settlementDeadline) { revert InvalidSignatureDeadline(); }
+
         // 3. Reconstruct the EIP-712 message
         bytes32 bankTxIdHash = bankProofs[_quoteId];
 
-        bytes32 structHash = keccak256(abi.encode(BANK_PAYMENT_TYPEHASH, _quoteId, quote.user, quote.pkrAmount, bankTxIdHash, _deadline ));
+        bytes32 structHash = keccak256(abi.encode(ONRAMP_PAYMENT_TYPEHASH, _quoteId, quote.user, quote.pkrAmount, bankTxIdHash, _deadline ));
 
         bytes32 digest = _hashTypedDataV4(structHash);
 
@@ -230,6 +237,32 @@ contract RaahvaPay is EIP712{
         if (!success) {revert TransferFailed(); }
 
         emit OnRampSettled( _quoteId, quote.user, payout, signer );
+    }
+
+    function settleOffRampQuote( uint256 _quoteId, uint256 _deadline, bytes32 _bankTxIdHash, bytes calldata _signature ) external {
+        Quote storage quote = quotes[_quoteId];
+
+        if(quote.usdcAmount < 5 ether) { revert QuoteNotAvailable(); }
+        if(quote.status != Status.Funded) { revert InvalidQuoteStatus(); }
+        if(quote.rampType != RampType.OffRamp) { revert InvalidRampType(); }
+        if(block.timestamp > quote.settlementDeadline) {revert SettlementDeadlinePassed();}
+        if(_deadline > quote.settlementDeadline) { revert InvalidSignatureDeadline(); }
+        if(_bankTxIdHash == bytes32(0)){ revert EmptyTxID(); }
+        if (block.timestamp > _deadline) { revert SignatureExpired(); } 
+
+        bytes32 structHash = keccak256(abi.encode(OFFRAMP_PAYMENT_TYPEHASH , _quoteId, quote.user, quote.pkrAmount, _bankTxIdHash, _deadline ));
+        bytes32 digest = _hashTypedDataV4(structHash);
+        address signer = ECDSA.recover(digest, _signature);
+
+        if (signer != operator) { revert UnAuthorized(); }
+
+        totalCustodied -= quote.usdcAmount;
+        totalLiquidity += quote.usdcAmount - quote.fee;
+        totalFee += quote.fee;
+        quote.status = Status.Settled;
+
+        emit OffRampSettled(_quoteId, quote.user, quote.pkrAmount, signer);
+
     }
 
     function supplyLiquidity() external payable {
