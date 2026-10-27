@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.30;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -100,6 +100,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
     event OffRampSettled(uint256 QuoteId, address indexed user, uint256 Amount, address indexed Signer);
     event RefundIssued(address indexed user, uint256 RefundAmount);
     event feeWithdrawn(address indexed Owner, uint256 FeeAmount);
+    event operatorChanged(address indexed OldOperator, address indexed NewOperator, address changedBy);
 
     function createQuote(uint256 _amount, RampType _rampType) public whenNotPaused {
         if(_amount == 0 ) { revert ZeroAmount();}
@@ -293,10 +294,6 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         emit LiquiditySupplied(msg.sender, msg.value);
     }
 
-    function pause() external onlyOwner { _pause(); }
-
-    function unpause() external onlyOwner { _unpause(); }
-
     function withdrawTotalFee() external onlyOwner {
         uint256 amount = totalFee;
         if(amount == 0) {revert ZeroAmount();}
@@ -308,5 +305,17 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
 
         emit feeWithdrawn(msg.sender, amount);
     } 
-    
+
+    // Owner only Functions
+    function pause() external onlyOwner { _pause(); }
+
+    function unpause() external onlyOwner { _unpause(); }
+
+    function changeOperator(address _newOperator) external onlyOwner {
+        address oldOperator = operator;
+        operator = _newOperator;
+        emit operatorChanged(oldOperator, operator, msg.sender);
+    }
+
+
 }
