@@ -34,6 +34,7 @@ interface IRateOracle{
  error SettlementDeadlinePassed();
  error InvalidSignatureDeadline();
  error SettlementDeadlineNotPass();
+ error MaxFeeRate();
 
 contract RaahvaPay is Pausable, Ownable, EIP712{
 
@@ -101,6 +102,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
     event RefundIssued(address indexed user, uint256 RefundAmount);
     event feeWithdrawn(address indexed Owner, uint256 FeeAmount);
     event operatorChanged(address indexed OldOperator, address indexed NewOperator, address changedBy);
+    event feeRateChanged(uint16 OldFeeRate, uint16 NewFeeRate, address indexed changedBy);
 
     function createQuote(uint256 _amount, RampType _rampType) public whenNotPaused {
         if(_amount == 0 ) { revert ZeroAmount();}
@@ -163,7 +165,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
      emit QuoteCreated( quoteId, msg.sender, pkrAmount, usdcAmount, _rampType );
     }
 
-    function fundOffRampQoute(uint256 _qouteId) external whenNotPaused payable{
+    function fundOffRampQoute(uint256 _qouteId) external payable whenNotPaused {
         Quote storage quote = quotes[_qouteId];
         if(quote.usdcAmount == 0) {revert QuoteNotAvailable();}
         if(block.timestamp > quote.expireAt) { revert QuoteExpired();}
@@ -247,7 +249,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
     function settleOffRampQuote( uint256 _quoteId, uint256 _deadline, bytes32 _bankTxIdHash, bytes calldata _signature ) external whenNotPaused {
         Quote storage quote = quotes[_quoteId];
 
-        if(quote.usdcAmount < 5 ether) { revert QuoteNotAvailable(); }
+        if(quote.usdcAmount == 0) { revert QuoteNotAvailable(); }
         if(quote.status != Status.Funded) { revert InvalidQuoteStatus(); }
         if(quote.rampType != RampType.OffRamp) { revert InvalidRampType(); }
         if(block.timestamp > quote.settlementDeadline) {revert SettlementDeadlinePassed();}
@@ -294,6 +296,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         emit LiquiditySupplied(msg.sender, msg.value);
     }
 
+    // Owner only Functions
     function withdrawTotalFee() external onlyOwner {
         uint256 amount = totalFee;
         if(amount == 0) {revert ZeroAmount();}
@@ -306,7 +309,6 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         emit feeWithdrawn(msg.sender, amount);
     } 
 
-    // Owner only Functions
     function pause() external onlyOwner { _pause(); }
 
     function unpause() external onlyOwner { _unpause(); }
@@ -315,6 +317,15 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         address oldOperator = operator;
         operator = _newOperator;
         emit operatorChanged(oldOperator, operator, msg.sender);
+    }
+
+    function changeFeeRate(uint16 _newFeeRate) external onlyOwner {
+        if(_newFeeRate > 500){ revert MaxFeeRate();}
+        uint16 oldFeeRate = feeRate;
+
+        feeRate = _newFeeRate; 
+
+        emit feeRateChanged(oldFeeRate, feeRate, msg.sender);
     }
 
 
