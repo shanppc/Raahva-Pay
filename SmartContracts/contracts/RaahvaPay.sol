@@ -35,6 +35,7 @@ interface IRateOracle{
  error InvalidSignatureDeadline();
  error SettlementDeadlineNotPass();
  error MaxFeeRate();
+ error AlreadyExpired();
 
 contract RaahvaPay is Pausable, Ownable, EIP712{
 
@@ -188,7 +189,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         if(quote.status != Status.QuoteCreated) {revert QuoteNotCreated();}
         if(quote.user != msg.sender) {revert UnAuthorized();}
         if(quote.rampType != RampType.OnRamp) {revert InvalidRampType();}
-        if(block.timestamp > quote.expireAt) {revert QuoteExpired();}
+        if(block.timestamp >= quote.expireAt) {revert QuoteExpired();}
         if(bytes(_bankTxId).length == 0){ revert EmptyTxID();}
 
         bytes32 bankTxIdHash = keccak256(bytes(_bankTxId));
@@ -294,6 +295,18 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         totalLiquidity += msg.value;
 
         emit LiquiditySupplied(msg.sender, msg.value);
+    }
+
+    function expireQuote(uint256 _quoteId) external {
+        Quote storage quote = quotes[_quoteId];
+        if(quote.usdcAmount == 0){revert QuoteNotAvailable();}
+        if(quote.status == Status.Expired){revert AlreadyExpired();}
+        if(quote.user != msg.sender){ revert UnAuthorized();}
+        if(quote.status == Status.QuoteCreated  && quote.expireAt > block.timestamp) { revert QuoteExpired(); } 
+        if(quote.status == Status.ProofSubmitted && quote.settlementDeadline > block.timestamp) { revert SettlementDeadlinePassed();}
+        if(quote.status == Status.Settled || quote.status == Status.Refunded || quote.status == Status.Funded ) {revert InvalidQuoteStatus(); }
+
+        quote.status = Status.Expired;
     }
 
     // Owner only Functions
