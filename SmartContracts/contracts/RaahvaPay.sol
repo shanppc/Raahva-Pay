@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
+// Copyright (c) 2026 Zeeshan. All rights reserved.
 pragma solidity ^0.8.30;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -32,8 +33,7 @@ interface IRateOracle{
  error TransferFailed();
  error InvalidRampType();
  error SettlementDeadlinePassed();
- error InvalidSignatureDeadline();
- error SettlementDeadlineNotPass();
+ error SettlementDeadlineNotPassed();
  error MaxFeeRate();
  error AlreadyExpired();
  error QuoteNotExpiredYet();
@@ -168,7 +168,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
      emit QuoteCreated( quoteId, msg.sender, pkrAmount, usdcAmount, _rampType );
     }
 
-    function fundOffRampQoute(uint256 _qouteId) external payable whenNotPaused {
+    function fundOffRampQuote(uint256 _qouteId) external payable whenNotPaused {
         Quote storage quote = quotes[_qouteId];
         if(quote.usdcAmount == 0) {revert QuoteNotAvailable();}
         if(block.timestamp > quote.expireAt) { revert QuoteExpired();}
@@ -207,7 +207,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         emit BankProofSumbitted(_quoteId, msg.sender, bankTxIdHash);
     }
 
-    function verifyAndSettleOnRamp(uint256 _quoteId, uint256 _deadline, bytes calldata _signature ) external whenNotPaused {
+    function verifyAndSettleOnRamp(uint256 _quoteId, bytes calldata _signature ) external whenNotPaused {
         Quote storage quote = quotes[_quoteId];
         // 1. Validate quote
         if (quote.usdcAmount == 0) {revert QuoteNotAvailable(); }
@@ -217,14 +217,12 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         if (quote.rampType != RampType.OnRamp) { revert InvalidRampType(); }
 
         // 2. Validate signature deadline
-        if (block.timestamp > _deadline) { revert SignatureExpired(); }
-
-        if(_deadline > quote.settlementDeadline) { revert InvalidSignatureDeadline(); }
+        if (block.timestamp > quote.settlementDeadline) { revert SignatureExpired(); }
 
         // 3. Reconstruct the EIP-712 message
         bytes32 bankTxIdHash = bankProofs[_quoteId];
 
-        bytes32 structHash = keccak256(abi.encode(ONRAMP_PAYMENT_TYPEHASH, _quoteId, quote.user, quote.pkrAmount, bankTxIdHash, _deadline ));
+        bytes32 structHash = keccak256(abi.encode(ONRAMP_PAYMENT_TYPEHASH, _quoteId, quote.user, quote.pkrAmount, bankTxIdHash, quote.settlementDeadline ));
 
         bytes32 digest = _hashTypedDataV4(structHash);
 
@@ -249,19 +247,17 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         emit OnRampSettled( _quoteId, quote.user, payout, signer );
     }
 
-    function settleOffRampQuote( uint256 _quoteId, uint256 _deadline, bytes32 _bankTxIdHash, bytes calldata _signature ) external whenNotPaused {
+    function settleOffRampQuote( uint256 _quoteId, bytes32 _bankTxIdHash, bytes calldata _signature ) external whenNotPaused {
         Quote storage quote = quotes[_quoteId];
 
         if(quote.usdcAmount == 0) { revert QuoteNotAvailable(); }
         if(quote.status != Status.Funded) { revert InvalidQuoteStatus(); }
         if(quote.rampType != RampType.OffRamp) { revert InvalidRampType(); }
         if(block.timestamp > quote.settlementDeadline) {revert SettlementDeadlinePassed();}
-        if(_deadline > quote.settlementDeadline) { revert InvalidSignatureDeadline(); }
         if(_bankTxIdHash == bytes32(0)){ revert EmptyTxID(); }
-        if(block.timestamp > _deadline) { revert SignatureExpired(); }
         if(usedBankTxIds[_bankTxIdHash]){ revert TxIdAlreadyUsed();}
 
-        bytes32 structHash = keccak256(abi.encode(OFFRAMP_PAYMENT_TYPEHASH , _quoteId, quote.user, quote.pkrAmount, _bankTxIdHash, _deadline ));
+        bytes32 structHash = keccak256(abi.encode(OFFRAMP_PAYMENT_TYPEHASH , _quoteId, quote.user, quote.pkrAmount, _bankTxIdHash, quote.settlementDeadline ));
         bytes32 digest = _hashTypedDataV4(structHash);
         address signer = ECDSA.recover(digest, _signature);
 
@@ -283,7 +279,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         if(quote.user != msg.sender){ revert UnAuthorized(); }
         if(quote.rampType != RampType.OffRamp){revert InvalidRampType(); }
         if(quote.status != Status.Funded){ revert InvalidQuoteStatus(); }
-        if(quote.settlementDeadline >= block.timestamp){ revert SettlementDeadlineNotPass();}
+        if(quote.settlementDeadline >= block.timestamp){ revert SettlementDeadlineNotPassed();}
 
         quote.status = Status.Refunded;
         totalCustodied -= quote.usdcAmount;
@@ -307,8 +303,8 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         if(quote.status == Status.Expired){revert AlreadyExpired();}
         if(quote.user != msg.sender){ revert UnAuthorized();}
         if(quote.status == Status.QuoteCreated  && quote.expireAt > block.timestamp) { revert QuoteNotExpiredYet();} 
-        if(quote.status == Status.ProofSubmitted && quote.settlementDeadline >= block.timestamp) { revert SettlementDeadlinePassed();}
-        if(quote.status == Status.Settled || quote.status == Status.Refunded || quote.status == Status.Funded ) {revert InvalidQuoteStatus(); }
+        if(quote.settlementDeadline >= block.timestamp) { revert SettlementDeadlineNotPassed();}
+        if(quote.status == Status.Settled || quote.status == Status.Refunded || quote.status == Status.Funded || quote.status == Status.ProofSubmitted ) {revert InvalidQuoteStatus(); }
 
         quote.status = Status.Expired;
 
