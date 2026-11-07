@@ -87,6 +87,21 @@ describe("OffRamp", function () {
       expect(await ramp.totalFee()).to.equal(updatedQuote.fee);
     });
 
+    it("should refund to the user", async function () {
+      await ramp.connect(user).fundOffRampQuote(0, {value: ethers.parseEther("100")});
+
+      await ethers.provider.send("evm_increaseTime", [601]);
+      await ethers.provider.send("evm_mine", []);
+
+      await ramp.connect(user).refundQuote(0);
+      const quote = await ramp.quotes(0);
+      
+      expect(quote.status).to.equal(4n);
+      expect(await ramp.totalCustodied()).to.equal(0n);
+      expect(await ramp.totalLiquidity()).to.equal(0n);
+      expect(await ramp.totalFee()).to.equal(0n);
+    });
+
   });
 
 });
