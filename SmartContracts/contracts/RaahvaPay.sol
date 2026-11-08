@@ -16,7 +16,6 @@ interface IRateOracle{
  error ZeroAmount();
  error NotMinAmount();
  error InvalidExchangeRate();
- error RateNotInitialized();
  error  StaleRate();
  error FutureTime();
  error QuoteExpired();
@@ -101,9 +100,11 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
     //qouteId => Qoute
     mapping (uint256 => Quote) public quotes;
     // quoteId => bankProff hash
-    mapping (uint256 => bytes32) public bankProofs;
-    // bankProff hash => is user already used the proof
-    mapping(bytes32 => bool ) public usedBankTxIds;
+    mapping (uint256 => bytes32) public onRampBankProofs;
+    // bankProff hash => is user already used the proof for onRamp 
+    mapping(bytes32 => bool) public usedOnRampBankTxIds;
+    // bankProff hash => is user already used the proof for OffRamp 
+    mapping(bytes32 => bool) public usedOffRampBankTxIds;
 
     constructor(
         address _oracle, 
@@ -258,7 +259,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         emit QuoteFunded(_qouteId, msg.sender, msg.value, quote.rampType);
     }
 
-    function sumbitBankProof(
+    function submitOnRampBankProof(
           uint256 _quoteId, 
           string calldata _bankTxId
         ) 
@@ -275,10 +276,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
 
         bytes32 bankTxIdHash = keccak256(bytes(_bankTxId));
 
-        if(usedBankTxIds[bankTxIdHash]){ revert TxIdAlreadyUsed();}
-
-        bankProofs[_quoteId] = bankTxIdHash;
-        usedBankTxIds[bankTxIdHash] = true;
+        onRampBankProofs[_quoteId] = bankTxIdHash;
 
         quote.status = Status.ProofSubmitted;
         quote.settlementDeadline = uint64(block.timestamp + 10 minutes);
@@ -294,18 +292,14 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         whenNotPaused 
     {
         Quote storage quote = quotes[_quoteId];
-        // 1. Validate quote
         if (quote.usdcAmount == 0) {revert QuoteNotAvailable(); }
-
         if (quote.status != Status.ProofSubmitted) { revert InvalidQuoteStatus(); }
-
         if (quote.rampType != RampType.OnRamp) { revert InvalidRampType(); }
-
-        // 2. Validate signature deadline
         if (block.timestamp > quote.settlementDeadline) { revert SignatureExpired(); }
 
-        // 3. Reconstruct the EIP-712 message
-        bytes32 bankTxIdHash = bankProofs[_quoteId];
+        bytes32 bankTxIdHash = onRampBankProofs[_quoteId];
+
+        if (usedOnRampBankTxIds[bankTxIdHash]) {revert TxIdAlreadyUsed();}
 
         bytes32 structHash = keccak256(
             abi.encode(
@@ -320,21 +314,19 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
 
         bytes32 digest = _hashTypedDataV4(structHash);
 
-        // 4. Recover and authenticate operator
         address signer = ECDSA.recover(digest, _signature);
 
         if (signer != operator) { revert UnAuthorized(); }
 
-        // 5. Check available protocol liquidity
         if (quote.usdcAmount > totalLiquidity) { revert InsufficientLiquidity();}
 
+        usedOnRampBankTxIds[bankTxIdHash] = true;// consumed tx id
         uint256 payout = quote.usdcAmount - quote.fee;
-        // 6. Update state before external interaction
         quote.status = Status.Settled;
         totalLiquidity -= quote.usdcAmount;
         totalFee += quote.fee;
 
-        // 7. Release USDC to the user
+        // release USDC to the user
         (bool success, ) = payable(quote.user).call{value: payout}("");
         if (!success) {revert TransferFailed(); }
 
@@ -356,7 +348,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         if(quote.rampType != RampType.OffRamp) { revert InvalidRampType(); }
         if(block.timestamp > quote.settlementDeadline) {revert SettlementDeadlinePassed();}
         if(_bankTxIdHash == bytes32(0)){ revert EmptyTxID(); }
-        if(usedBankTxIds[_bankTxIdHash]){ revert TxIdAlreadyUsed();}
+        if(usedOffRampBankTxIds[_bankTxIdHash]){ revert TxIdAlreadyUsed();}
 
         bytes32 structHash = keccak256(
             abi.encode(
@@ -372,7 +364,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
 
         if (signer != operator) { revert UnAuthorized(); }
         
-        usedBankTxIds[_bankTxIdHash] = true;
+        usedOffRampBankTxIds[_bankTxIdHash] = true;
         totalCustodied -= quote.usdcAmount;
         totalLiquidity += quote.usdcAmount - quote.fee;
         totalFee += quote.fee;
