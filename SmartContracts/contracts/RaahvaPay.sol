@@ -36,6 +36,9 @@ interface IRateOracle{
  error MaxFeeRate();
  error AlreadyExpired();
  error QuoteNotExpiredYet();
+ error ExtensionLimitReached();
+ error InvalidExtensionDeadline();
+ error InvalidAuthorizationDeadline();
 
 contract RaahvaPay is Pausable, Ownable, EIP712{
 
@@ -43,6 +46,8 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
     uint256 public constant USDC_PRECISION = 1e18;
     uint64 private constant MAX_RATE_AGE = 1 days;
     uint256 public constant BASIS_POINTS = 10000; // 100%
+    uint8 public constant MAX_EXTENSIONS = 2;
+    uint64 public constant EXTENSION_DURATION = 10 minutes;
 
     IRateOracle public oracle;
     uint256 private nextQuoteId;
@@ -51,6 +56,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
     uint256 public totalFee;
     uint256 public totalCustodied;
     uint256 public totalLiquidity;
+    uint256 public reservedLiquidity;
     address public operator;
 
     bytes32 public constant ONRAMP_PAYMENT_TYPEHASH = keccak256( 
@@ -60,7 +66,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         "uint256 pkrAmount,"
         "bytes32 bankTxIdHash,"
         "uint256 deadline)"
-        );
+    );
     bytes32 public constant OFFRAMP_PAYMENT_TYPEHASH = keccak256( 
         "OffRampPaymentVerification("
         "uint256 quoteId,"
@@ -68,7 +74,17 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         "uint256 pkrAmount,"
         "bytes32 bankTxIdHash,"
         "uint256 deadline)"
-        );
+    );
+    bytes32 public constant ONRAMP_EXTENSION_TYPEHASH = keccak256(
+        "OnRampSettlementExtension("
+        "uint256 quoteId,"
+        "address user,"
+        "bytes32 bankTxIdHash,"
+        "uint64 previousSettlementDeadline,"
+        "uint64 newSettlementDeadline,"
+        "uint8 extensionCount,"
+        "uint64 authorizationDeadline)"
+    );    
 
     enum Status {
         QuoteCreated,
@@ -92,6 +108,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         address user;
         uint64 expireAt;
         uint64 settlementDeadline;
+        uint8 extensionCount;
         uint16 feeRate;
         Status status;
         RampType rampType;
@@ -170,6 +187,13 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
      address indexed changedBy
     );
     event QuoteGotExpired(uint256 quoteId);
+    event OnRampSettlementExtended(
+        uint256 indexed quoteId,
+        address indexed user,
+        uint64 newSettlementDeadline,
+        uint8 extensionCount,
+        address operator
+    );
 
     function createQuote(
           uint256 _amount,
@@ -197,7 +221,11 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
           usdcAmount = Math.mulDiv( pkrAmount, precision, exchange_rate );
 
           if (usdcAmount < 5 ether) { revert NotMinAmount(); }
-          if (usdcAmount > totalLiquidity) { revert InsufficientLiquidity();}
+          if (reservedLiquidity > totalLiquidity) { revert InsufficientLiquidity();}
+          // available liquidity = totalLiquidity - reservedLiquidity.
+          if (usdcAmount > totalLiquidity - reservedLiquidity) { revert InsufficientLiquidity();}
+
+          reservedLiquidity += usdcAmount;
         } 
         else if (_rampType == RampType.OffRamp) {
            usdcAmount = _amount;
@@ -231,6 +259,7 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
        user: msg.sender,
        expireAt: uint64(block.timestamp + 10 minutes),
        settlementDeadline: 0,
+       extensionCount: 0,
        feeRate: quoteFeeRate,
        status: Status.QuoteCreated,
        rampType: _rampType });
@@ -318,12 +347,13 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
 
         if (signer != operator) { revert UnAuthorized(); }
 
-        if (quote.usdcAmount > totalLiquidity) { revert InsufficientLiquidity();}
+        if (quote.usdcAmount > reservedLiquidity) { revert InsufficientLiquidity(); }
 
-        usedOnRampBankTxIds[bankTxIdHash] = true;// consumed tx id
+        usedOnRampBankTxIds[bankTxIdHash] = true; // consumed tx id
         uint256 payout = quote.usdcAmount - quote.fee;
         quote.status = Status.Settled;
         totalLiquidity -= quote.usdcAmount;
+        reservedLiquidity -= quote.usdcAmount;
         totalFee += quote.fee;
 
         // release USDC to the user
@@ -430,10 +460,89 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         {
             revert InvalidQuoteStatus(); 
         }
+        if(quote.rampType == RampType.OnRamp) {
+            reservedLiquidity -= quote.usdcAmount;
+        }
 
         quote.status = Status.Expired;
 
         emit QuoteGotExpired(_quoteId);
+    }
+
+    function extendOnRampSettlement(
+            uint256 _quoteId,
+            uint64 _newSettlementDeadline,
+            uint64 _authorizationDeadline,
+            bytes calldata _signature
+        )
+    external
+    whenNotPaused
+    {
+        Quote storage quote = quotes[_quoteId];
+
+        if (quote.usdcAmount == 0) { revert QuoteNotAvailable();}
+
+        if (quote.status != Status.ProofSubmitted) { revert InvalidQuoteStatus(); }
+
+        if (quote.rampType != RampType.OnRamp) { revert InvalidRampType(); }
+
+        if (block.timestamp <= quote.settlementDeadline) {
+            revert SettlementDeadlineNotPassed();
+        }
+
+        if (quote.extensionCount >= MAX_EXTENSIONS) {
+          revert ExtensionLimitReached();
+        }
+
+        if (
+                _newSettlementDeadline <= block.timestamp ||
+                _newSettlementDeadline > block.timestamp + EXTENSION_DURATION
+            ) 
+        {
+            revert InvalidExtensionDeadline();
+        }
+
+        if (
+                block.timestamp > _authorizationDeadline ||
+                _authorizationDeadline > block.timestamp + EXTENSION_DURATION
+            ) 
+        {
+         revert InvalidAuthorizationDeadline();
+        }
+
+        bytes32 bankTxIdHash = onRampBankProofs[_quoteId];
+
+        uint8 nextExtensionCount = quote.extensionCount + 1;
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ONRAMP_EXTENSION_TYPEHASH,
+                _quoteId,
+                quote.user,
+                bankTxIdHash,
+                quote.settlementDeadline,
+                _newSettlementDeadline,
+                nextExtensionCount,
+                _authorizationDeadline
+            )
+        );  
+
+        bytes32 digest = _hashTypedDataV4(structHash);
+
+        address signer = ECDSA.recover(digest, _signature);
+
+        if (signer != operator) {revert UnAuthorized(); }
+
+        quote.settlementDeadline = _newSettlementDeadline;
+        quote.extensionCount = nextExtensionCount;
+
+        emit OnRampSettlementExtended(
+            _quoteId,
+            quote.user,
+            quote.settlementDeadline,
+            nextExtensionCount,
+            signer
+        );
     }
 
     // Owner only Functions
