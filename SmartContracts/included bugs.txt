@@ -1,0 +1,3 @@
+1st. Maximum deviation per update 
+2bd. Timelocked oracle replacement
+3rd. Circuit breaker

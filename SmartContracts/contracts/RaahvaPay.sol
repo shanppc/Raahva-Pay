@@ -39,6 +39,8 @@ interface IRateOracle{
  error ExtensionLimitReached();
  error InvalidExtensionDeadline();
  error InvalidAuthorizationDeadline();
+ error InvalidOracleDecimals();
+ error InvalidOracleAddress();
 
 contract RaahvaPay is Pausable, Ownable, EIP712{
 
@@ -130,6 +132,13 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         EIP712("Raahva Pay", "1") 
         Ownable(msg.sender) 
     {
+        if (_oracle == address(0) || _oracle.code.length == 0){
+                revert InvalidOracleAddress();
+            }
+
+        if (IRateOracle(_oracle).decimals() != 8) {   
+            revert InvalidOracleDecimals();  
+        }
         oracle = IRateOracle(_oracle);
         operator = _operator;
     }
@@ -194,6 +203,12 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         uint8 extensionCount,
         address operator
     );
+    event OracleChanged(
+        address indexed oldOracle, 
+        address indexed newOracle,
+        address indexed changedBy
+    );
+
 
     function createQuote(
           uint256 _amount,
@@ -576,6 +591,22 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         feeRate = _newFeeRate; 
 
         emit FeeRateChanged(oldFeeRate, feeRate, msg.sender);
+    }
+
+    function chnageOracle(address _newOracle) external onlyOwner {
+        if (_newOracle == address(0) || _newOracle.code.length == 0){
+                revert InvalidOracleAddress();
+        }
+
+        if (IRateOracle(_newOracle).decimals() != 8) {   
+            revert InvalidOracleDecimals();  
+        } 
+
+        address oldOracle =  address(oracle);
+
+        oracle = IRateOracle(_newOracle);
+
+        emit OracleChanged(oldOracle, _newOracle, msg.sender);
     }
 
 }
