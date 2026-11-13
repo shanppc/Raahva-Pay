@@ -452,31 +452,37 @@ contract RaahvaPay is Pausable, Ownable, EIP712{
         Quote storage quote = quotes[_quoteId];
         if(quote.usdcAmount == 0){revert QuoteNotAvailable();}
         if(quote.status == Status.Expired){revert AlreadyExpired();}
-        if(quote.user != msg.sender){ revert UnAuthorized();}
+
         if(
-              quote.status == Status.QuoteCreated  
-              && quote.expireAt > block.timestamp
-            ) 
+           quote.status == Status.QuoteCreated  
+           && quote.expireAt > block.timestamp
+        ) 
         { 
             revert QuoteNotExpiredYet();
         } 
         if( 
-            quote.settlementDeadline >= block.timestamp
-           ) 
+          quote.settlementDeadline >= block.timestamp
+        ) 
         { 
             revert SettlementDeadlineNotPassed();
         }
         if(
-             quote.status == Status.Settled 
-             || quote.status == Status.Refunded 
-             || quote.status == Status.Funded 
-             || quote.status == Status.ProofSubmitted 
-            ) 
+            quote.status == Status.Settled 
+            || quote.status == Status.Refunded 
+            || quote.status == Status.Funded 
+        ) 
         {
             revert InvalidQuoteStatus(); 
         }
-        if(quote.rampType == RampType.OnRamp) {
-            reservedLiquidity -= quote.usdcAmount;
+        if(
+            quote.status == Status.ProofSubmitted 
+            && block.timestamp <= quote.settlementDeadline + EXTENSION_DURATION
+        )
+        {
+            revert SettlementDeadlineNotPassed();
+        }
+        if(quote.rampType == RampType.OnRamp) { 
+            reservedLiquidity -= quote.usdcAmount; 
         }
 
         quote.status = Status.Expired;
